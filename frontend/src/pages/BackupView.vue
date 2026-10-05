@@ -6,6 +6,7 @@ import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import { useHallStore } from '@/stores/hallStore'
 import { useDecayStore } from '@/stores/decayStore'
+import { useLedgerStore } from '@/stores/ledgerStore'
 import { useRepairStore } from '@/stores/repairStore'
 import {
   DB_VERSION,
@@ -27,6 +28,7 @@ import { formatArea } from '@/utils/severity'
 const hallStore = useHallStore()
 const decayStore = useDecayStore()
 const repairStore = useRepairStore()
+const ledgerStore = useLedgerStore()
 
 const fileInput = ref<HTMLInputElement | null>(null)
 const importOverwrite = ref(true)
@@ -47,7 +49,9 @@ const counts = computed(() => ({
   elements: hallStore.elements.length,
   layers: hallStore.layers.length,
   decays: decayStore.decays.length,
-  repairSteps: repairStore.steps.length
+  repairSteps: repairStore.steps.length,
+  repairLedger: ledgerStore.ledger.length,
+  repairConflicts: ledgerStore.conflicts.length
 }))
 
 const storageRows = computed(() => [
@@ -59,7 +63,17 @@ const storageRows = computed(() => [
     key: 'id, layerId, type, severity, repaired, repairedAt, updatedAt',
     count: counts.value.decays
   },
-  { table: 'repairSteps（工序）', key: 'id, decayId, seq, name, state, updatedAt', count: counts.value.repairSteps }
+  { table: 'repairSteps（工序）', key: 'id, decayId, seq, name, state, updatedAt', count: counts.value.repairSteps },
+  {
+    table: 'repairLedger（施工流水，只追加）',
+    key: 'id, seq, decayId, stepId, action, acceptedAt',
+    count: counts.value.repairLedger
+  },
+  {
+    table: 'repairConflicts（待合并 / 裁决留痕）',
+    key: 'id, decayId, stepId, status, createdAt',
+    count: counts.value.repairConflicts
+  }
 ])
 
 const localStorageRows = computed(() => [
@@ -126,7 +140,7 @@ async function confirmImport(): Promise<void> {
     if (!confirmed) return
     const result = await importBackup(payload, importOverwrite.value)
     ElMessage.success(
-      `导入完成：殿宇 ${result.halls} / 构件 ${result.elements} / 层位 ${result.layers} / 病害 ${result.decays} / 工序 ${result.repairSteps}`
+      `导入完成：殿宇 ${result.halls} / 构件 ${result.elements} / 层位 ${result.layers} / 病害 ${result.decays} / 工序 ${result.repairSteps} / 流水 ${result.repairLedger ?? 0} / 待合并 ${result.repairConflicts ?? 0}`
     )
     importPreview.value = null
   } finally {
@@ -136,7 +150,7 @@ async function confirmImport(): Promise<void> {
 
 async function doClear(): Promise<void> {
   const confirmed = await ElMessageBox.confirm(
-    '将清空浏览器 IndexedDB 中的全部业务数据（殿宇、构件、层位、病害、工序），此操作不可撤销。是否继续？',
+    '将清空浏览器 IndexedDB 中的全部业务数据（殿宇、构件、层位、病害、工序、施工流水、待合并记录与草稿），此操作不可撤销。是否继续？',
     '清空本地数据',
     { type: 'error', confirmButtonText: '确认清空', cancelButtonText: '取消' }
   ).catch(() => false)
@@ -153,16 +167,30 @@ async function doSeed(): Promise<void> {
   ElMessage.success('已生成本地样例档案')
 }
 
-function previewCount(payload: BackupPayload, key: keyof Pick<BackupPayload, 'halls' | 'elements' | 'layers' | 'decays' | 'repairSteps'>): number {
-  return payload[key].length
+function previewCount(
+  payload: BackupPayload,
+  key: keyof Pick<
+    BackupPayload,
+    'halls' | 'elements' | 'layers' | 'decays' | 'repairSteps' | 'repairLedger' | 'repairConflicts'
+  >
+): number {
+  return (payload[key] ?? []).length
 }
 
-const previewKeys: Array<{ key: keyof Pick<BackupPayload, 'halls' | 'elements' | 'layers' | 'decays' | 'repairSteps'>; label: string }> = [
+const previewKeys: Array<{
+  key: keyof Pick<
+    BackupPayload,
+    'halls' | 'elements' | 'layers' | 'decays' | 'repairSteps' | 'repairLedger' | 'repairConflicts'
+  >
+  label: string
+}> = [
   { key: 'halls', label: '殿宇' },
   { key: 'elements', label: '构件' },
   { key: 'layers', label: '层位' },
   { key: 'decays', label: '病害' },
-  { key: 'repairSteps', label: '工序' }
+  { key: 'repairSteps', label: '工序' },
+  { key: 'repairLedger', label: '流水' },
+  { key: 'repairConflicts', label: '待合并' }
 ]
 </script>
 
@@ -214,7 +242,8 @@ const previewKeys: Array<{ key: keyof Pick<BackupPayload, 'halls' | 'elements' |
         </el-table-column>
       </el-table>
       <p class="muted storage-note">
-        版本 1 → 2 的迁移：decays 表补充 repairedAt 索引，修复状态字段缺失的历史数据按 updatedAt 回填。
+        版本 1 → 2 的迁移：decays 表补充 repairedAt 索引，修复状态字段缺失的历史数据按 updatedAt 回填。<br />
+        版本 2 → 3 的迁移：新增施工流水（只追加）、待合并区、失败草稿三张表；缺少流水版本的旧工序按现状补初始完成记录，并按对账结果回写病害修复现状。
       </p>
     </div>
 

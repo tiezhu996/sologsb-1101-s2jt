@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
 import { db, readUiPrefs, writeUiPrefs } from '@/utils/db'
 import { useIdbTable } from '@/hooks/useIdbTable'
+import { useLedgerStore } from '@/stores/ledgerStore'
 import type { Element } from '@/types/element'
 import type { Hall, HallStat } from '@/types/hall'
 import type { PaintLayer } from '@/types/layer'
@@ -67,7 +68,11 @@ export const useHallStore = defineStore('hall', () => {
       const hallElements = elements.value.filter((element) => element.hallId === hall.id)
       const elementIds = new Set(hallElements.map((element) => element.id))
       const layerCount = layers.value.filter((layer) => elementIds.has(layer.elementId)).length
-      const repaired = list.filter((decay) => decay.repaired).length
+      // 修复统计读正式流水对账结果；未裁决待合并项不计入已修复
+      const ledgerStore = useLedgerStore()
+      const repaired = list.filter((decay) =>
+        ledgerStore.isDecayRepaired(decay.id, decay.repaired)
+      ).length
       return {
         hallId: hall.id,
         decayCount: list.length,
@@ -102,7 +107,10 @@ export const useHallStore = defineStore('hall', () => {
   )
 
   const totalDecay = computed(() => decays.value.length)
-  const totalUnrepaired = computed(() => decays.value.filter((decay) => !decay.repaired).length)
+  const totalUnrepaired = computed(() => {
+    const ledgerStore = useLedgerStore()
+    return decays.value.filter((decay) => !ledgerStore.isDecayRepaired(decay.id, decay.repaired)).length
+  })
   const totalArea = computed(() => decays.value.reduce((sum, decay) => sum + decay.areaCm2, 0))
 
   function setCurrentHall(id: string | null): void {
@@ -136,11 +144,10 @@ export const useHallStore = defineStore('hall', () => {
   async function removeLayer(id: string): Promise<void> {
     const layer = layers.value.find((item) => item.id === id)
     const decayIds = decays.value.filter((decay) => decay.layerId === id).map((decay) => decay.id)
-    await db.transaction('rw', [db.layers, db.decays, db.repairSteps], async () => {
-      await db.repairSteps.where('decayId').anyOf(decayIds).delete()
-      await db.decays.bulkDelete(decayIds)
+    await db.transaction('rw', [db.layers], async () => {
       await db.layers.delete(id)
     })
+    await useLedgerStore().cascadeDeleteDecays(decayIds)
     if (layer) await syncLayerCount(layer.elementId)
   }
 
@@ -148,16 +155,11 @@ export const useHallStore = defineStore('hall', () => {
   async function removeElement(id: string): Promise<void> {
     const layerIds = layersOfElement(id).map((layer) => layer.id)
     const decayIds = decays.value.filter((decay) => layerIds.includes(decay.layerId)).map((decay) => decay.id)
-    await db.transaction(
-      'rw',
-      [db.elements, db.layers, db.decays, db.repairSteps],
-      async () => {
-        await db.repairSteps.where('decayId').anyOf(decayIds).delete()
-        await db.decays.bulkDelete(decayIds)
-        await db.layers.bulkDelete(layerIds)
-        await db.elements.delete(id)
-      }
-    )
+    await db.transaction('rw', [db.elements, db.layers], async () => {
+      await db.layers.bulkDelete(layerIds)
+      await db.elements.delete(id)
+    })
+    await useLedgerStore().cascadeDeleteDecays(decayIds)
   }
 
   /** 层位数量变化后回写构件 layerCount，保证卡片回显一致 */
@@ -185,24 +187,19 @@ export const useHallStore = defineStore('hall', () => {
     await hallsTable.update(id, patch)
   }
 
-  /** 级联删除：殿宇 → 构件 → 层位 → 病害 → 工序 */
+  /** 级联删除：殿宇 → 构件 → 层位 → 病害 → 工序（正式流水保留可查，未裁决项作废留痕） */
   async function removeHall(id: string): Promise<void> {
     const elementIds = elements.value.filter((element) => element.hallId === id).map((element) => element.id)
     const layerIds = layers.value
       .filter((layer) => elementIds.includes(layer.elementId))
       .map((layer) => layer.id)
     const decayIds = decays.value.filter((decay) => layerIds.includes(decay.layerId)).map((decay) => decay.id)
-    await db.transaction(
-      'rw',
-      [db.halls, db.elements, db.layers, db.decays, db.repairSteps],
-      async () => {
-        await db.repairSteps.where('decayId').anyOf(decayIds).delete()
-        await db.decays.bulkDelete(decayIds)
-        await db.layers.bulkDelete(layerIds)
-        await db.elements.bulkDelete(elementIds)
-        await db.halls.delete(id)
-      }
-    )
+    await db.transaction('rw', [db.halls, db.elements, db.layers], async () => {
+      await db.layers.bulkDelete(layerIds)
+      await db.elements.bulkDelete(elementIds)
+      await db.halls.delete(id)
+    })
+    await useLedgerStore().cascadeDeleteDecays(decayIds)
     if (currentHallId.value === id) currentHallId.value = null
   }
 

@@ -70,7 +70,7 @@ npm run preview    # 本地预览构建产物（http://localhost:21801）
 | `/halls` | 殿宇总览 | 新建殿宇、按年代与结构类型筛选，卡片回显病害总数与未修复数 | Hall、Element、PaintLayer、Decay |
 | `/halls/:id/elements` | 构件与层位 | 构件树 + 层位表格，新增构件与层位，挂接病害 | Element、PaintLayer、Decay |
 | `/decays` | 病害档案台 | 按类型 / 程度 / 颜料 / 殿宇 / 部位组合筛选，批量改严重程度与类型 | Decay、PaintLayer |
-| `/repair` | 修复工序时间线 | 拖拽调整工序先后，回填材料与责任人，完成即回写病害为已修复 | RepairStep、Decay |
+| `/repair` | 修复工序时间线 | 拖拽调整工序先后，回填材料与责任人；完成 / 撤回走只追加施工流水，页面内裁决待合并项、重试失败草稿 | RepairStep、RepairLedger、RepairConflict、RepairDraft、Decay |
 | `/backup` | 本地数据与备份 | 查看本地结构版本、JSON 导入导出、清空与样例数据 | 全部模型 |
 
 `/` 与未匹配路径均重定向到 `/halls`。
@@ -85,9 +85,14 @@ npm run preview    # 本地预览构建产物（http://localhost:21801）
 | Element 构件 | `src/types/element.ts` | `id` `hallId` `position`（檐下/室内/梁枋/斗拱/天花） `name` `layerCount` `baseLayer` `status`（完好/观察/待修） | 按殿宇与部位二维筛选 |
 | PaintLayer 彩画层位 | `src/types/layer.ts` | `id` `elementId` `level`（由外至内） `patternName`（旋子/和玺/苏式） `pigment`（石青/石绿/朱砂/土黄） `thicknessMm` | 层位顺次叠压 |
 | Decay 病害记录 | `src/types/decay.ts` | `id` `layerId` `type`（起甲/剥落/空鼓/粉化/龟裂） `severity`（轻度/中度/重度） `areaCm2` `causeGuess` `repaired` | 同层位可叠加多条并汇总到殿宇 |
-| RepairStep 修复工序 | `src/types/repair.ts` | `id` `decayId` `seq` `name`（除尘/回贴/灌浆/补绘/封护） `material` `operator` `state`（未开始/进行中/已完成） | 拖拽排序，完成回写病害 |
+| RepairStep 修复工序 | `src/types/repair.ts` | `id` `decayId` `seq` `name`（除尘/回贴/灌浆/补绘/封护） `material` `operator` `state`（未开始/进行中/已完成） | 拖拽排序；完成态以流水对账为准 |
+| RepairLedgerEntry 施工流水 | `src/types/ledger.ts` | `id` `seq`（全局接纳顺序） `decayId` `stepId` `action`（complete/reverse） `baseSeq`（提交基准序号） `reverseOf` `acceptedAt` | **只追加**：完成记正向、撤回记反向，原施工过程永久可查，完成次数按正向记录累计 |
+| RepairConflict 待合并区 | `src/types/ledger.ts` | `id` `decayId` `stepId` `status`（pending/accepted/discarded） `baseSeq` `headSeqAtArrival` `entry` | 基准序号落后的后到提交整笔落入，裁决前不覆盖工序 / 病害现状，也不进入修复统计 |
+| RepairDraft 流水草稿 | `src/types/ledger.ts` | `id`（与流水同 id，幂等键） `entry` `attempts` `lastError` | 写入失败时保留，重试沿用同一 id，已接纳 / 已进待合并均不会重复累计 |
 
-数据结构版本号 `DB_VERSION` 定义在 `src/utils/db.ts`，当前为 `v2`：`decays` 表补充 `repairedAt` 索引，并为修复状态缺失的历史数据按 `updatedAt` 回填，升级逻辑写在 Dexie 的 `.upgrade()` 中。
+**并发提交协议（多标签页）**：页面提交完成 / 撤回时携带读取到的基准流水序号 `baseSeq`，数据库在同一事务内比较当前 `headSeq`——相等则按接纳顺序追加为下一条（`seq = headSeq + 1`）并回写工序工作态与病害现状；不等则整笔写入待合并区等待人工裁决，绝不覆盖已完成的工序或病害现状。档案台、工序时间线、殿宇总览、备份导入导出统一消费 `src/utils/reconcile.ts` 的对账结果；存在未裁决项的病害不计入任何修复统计。
+
+数据结构版本号 `DB_VERSION` 定义在 `src/utils/db.ts`，当前为 `v3`：新增 `repairLedger` / `repairConflicts` / `repairDrafts` 三张表，升级时为缺少流水版本且现状为「已完成」的旧工序按 `decayId + seq` 补初始正向流水，并按对账结果回写病害 `repaired` / `repairedAt`；`v2` 迁移（decays 补 `repairedAt` 索引并回填）继续保留。
 
 ---
 
@@ -97,13 +102,13 @@ npm run preview    # 本地预览构建产物（http://localhost:21801）
 sologsb-1101/
 ├── frontend/                     # 前端源码
 │   ├── src/
-│   │   ├── types/                # hall.ts element.ts layer.ts decay.ts repair.ts
-│   │   ├── stores/               # hallStore.ts decayStore.ts repairStore.ts
+│   │   ├── types/                # hall.ts element.ts layer.ts decay.ts repair.ts ledger.ts
+│   │   ├── stores/               # hallStore.ts decayStore.ts repairStore.ts ledgerStore.ts
 │   │   ├── components/common/    # SeverityTag.vue FilterBar.vue StatBadge.vue EmptyPanel.vue
 │   │   ├── hooks/                # useDecayFilter.ts useIdbTable.ts
 │   │   ├── pages/                # HallList.vue ElementDetail.vue DecayBoard.vue RepairPlan.vue BackupView.vue
 │   │   ├── router/               # index.ts
-│   │   ├── utils/                # severity.ts db.ts export.ts
+│   │   ├── utils/                # severity.ts db.ts export.ts reconcile.ts
 │   │   ├── styles/               # main.css
 │   │   ├── App.vue main.ts env.d.ts
 │   ├── public/favicon.svg
@@ -122,9 +127,9 @@ sologsb-1101/
 
 ## 七、数据存储说明
 
-- **IndexedDB（Dexie，数据库名 `gbmuralarch`）**：5 张业务表 `halls` / `elements` / `layers` / `decays` / `repairSteps`，由 `src/utils/db.ts` 统一定义 schema、版本号与升级迁移；所有增删改查通过 `src/hooks/useIdbTable.ts` 封装，并用 `liveQuery` 提供响应式订阅。
-- **localStorage**：仅存元数据 —— `gbmuralarch:db-version`（本地结构版本）、`gbmuralarch:last-backup-at`（最近一次导出时间）、`gbmuralarch:ui-prefs`（当前选中殿宇、工序排序方式）。
-- **备份**：`/backup` 页面可导出 JSON（含 5 张表全量数据与结构版本），导入时先校验 `app` 字段与各集合数组完整性；支持「覆盖导入」与「追加导入（重新分配 id）」两种模式。
+- **IndexedDB（Dexie，数据库名 `gbmuralarch`）**：5 张业务表 `halls` / `elements` / `layers` / `decays` / `repairSteps`，外加施工流水三张表 `repairLedger`（只追加流水）/ `repairConflicts`（待合并区与裁决留痕）/ `repairDrafts`（写入失败草稿），由 `src/utils/db.ts` 统一定义 schema、版本号与升级迁移；页面响应式订阅通过 `src/hooks/useIdbTable.ts` 封装，完成 / 撤回的写入统一走 `src/stores/ledgerStore.ts`。
+- **localStorage**：仅存元数据 —— `gbmuralarch:db-version`（本地结构版本）、`gbmuralarch:last-backup-at`（最近一次导出时间）、`gbmuralarch:ui-prefs`（当前选中殿宇、工序排序方式）；标签页标识 `gbmuralarch:tab-id` 存于 sessionStorage。
+- **备份**：`/backup` 页面可导出 JSON（含全部表数据与结构版本，含正式流水与待合并留痕；失败草稿是本地临时态，不导出），导入时先校验 `app` 字段与各集合数组完整性；旧版本备份缺少流水时，导入阶段按工序现状补初始流水后再统一对账回写；支持「覆盖导入」与「追加导入（重新分配 id，流水序号顺延）」两种模式。
 - **隐私与无状态**：数据不上传任何服务器，容器不挂载命名卷；清理浏览器站点数据或更换浏览器会丢失档案，请定期导出备份。
 
 ---

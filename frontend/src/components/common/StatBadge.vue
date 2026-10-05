@@ -8,7 +8,8 @@ import {
   Histogram,
   PieChart,
   TrendCharts,
-  WarningFilled
+  WarningFilled,
+  WarnTriangleFilled
 } from '@element-plus/icons-vue'
 
 type BadgeTone = 'default' | 'primary' | 'success' | 'warning' | 'danger' | 'info'
@@ -54,7 +55,8 @@ const iconMap: Record<string, Component> = {
   Histogram,
   PieChart,
   TrendCharts,
-  WarningFilled
+  WarningFilled,
+  WarnTriangleFilled
 }
 
 const iconComponent = computed<Component>(() => iconMap[props.icon] ?? DataLine)

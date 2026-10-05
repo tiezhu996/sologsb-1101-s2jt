@@ -29,4 +29,6 @@ export interface RepairGroup {
   doneCount: number
   totalCount: number
   percent: number
+  /** 该病害存在未裁决待合并项：不计入修复统计，时间线给出标记 */
+  disputed: boolean
 }

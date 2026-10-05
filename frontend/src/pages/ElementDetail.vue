@@ -169,7 +169,7 @@ const selectedStats = computed(() => {
   })
   return {
     decayCount: decays.length,
-    unrepaired: decays.filter((decay) => !decay.repaired).length,
+    unrepaired: decays.filter((decay) => !decayStore.isDecayRepaired(decay)).length,
     area: decays.reduce((sum, decay) => sum + decay.areaCm2, 0),
     severity
   }
@@ -542,8 +542,22 @@ const severityOptions = SEVERITIES
                         <el-table-column label="成因初判" prop="causeGuess" min-width="200" />
                         <el-table-column label="修复状态" width="100">
                           <template #default="{ row: decay }">
-                            <el-tag size="small" :type="decay.repaired ? 'success' : 'info'" effect="plain">
-                              {{ decay.repaired ? '已修复' : '未修复' }}
+                            <el-tag
+                              size="small"
+                              :type="decayStore.isDecayDisputed(decay.id)
+                                ? 'warning'
+                                : decayStore.isDecayRepaired(decay)
+                                  ? 'success'
+                                  : 'info'"
+                              effect="plain"
+                            >
+                              {{
+                                decayStore.isDecayDisputed(decay.id)
+                                  ? '待裁决'
+                                  : decayStore.isDecayRepaired(decay)
+                                    ? '已修复'
+                                    : '未修复'
+                              }}
                             </el-tag>
                           </template>
                         </el-table-column>

@@ -8,6 +8,7 @@ import FilterBar, { type FilterModel } from '@/components/common/FilterBar.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import { useHallStore } from '@/stores/hallStore'
 import { useDecayStore } from '@/stores/decayStore'
+import { useLedgerStore } from '@/stores/ledgerStore'
 import { useRepairStore } from '@/stores/repairStore'
 import { seedDemoData } from '@/utils/export'
 import { formatArea } from '@/utils/severity'
@@ -17,6 +18,7 @@ const router = useRouter()
 const hallStore = useHallStore()
 const decayStore = useDecayStore()
 const repairStore = useRepairStore()
+const ledgerStore = useLedgerStore()
 
 const dialogVisible = ref(false)
 const submitting = ref(false)
@@ -67,7 +69,7 @@ const cards = computed(() =>
       const decay = decayStore.rows.find((row) => row.decay.id === step.decayId)
       return decay?.hallId === hall.id
     })
-    const doneSteps = steps.filter((step) => step.state === '已完成').length
+    const doneSteps = steps.filter((step) => ledgerStore.isStepDone(step.id)).length
     return {
       hall,
       stat,
