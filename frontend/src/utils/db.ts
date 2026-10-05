@@ -4,9 +4,11 @@ import type { Element } from '@/types/element'
 import type { PaintLayer } from '@/types/layer'
 import type { Decay } from '@/types/decay'
 import type { RepairStep } from '@/types/repair'
+import type { LedgerDraft, LedgerEntry, PendingMerge } from '@/types/ledger'
+import { foldDecayStatus, foldEntries } from '@/utils/ledger'
 
 /** 本地结构版本号：新增/修改表结构时必须递增，并补充 upgrade 迁移 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** 本地存储键名（localStorage 侧的少量元数据） */
 export const LS_KEYS = {
@@ -35,6 +37,12 @@ export interface BackupPayload {
   layers: PaintLayer[]
   decays: Decay[]
   repairSteps: RepairStep[]
+  /** 正式施工流水（只追加） */
+  ledgerEntries: LedgerEntry[]
+  /** 待合并区（未裁决项） */
+  pendingMerges: PendingMerge[]
+  /** 写入失败后保留、待重试的流水草稿 */
+  ledgerDrafts: LedgerDraft[]
 }
 
 export class MuralArchDatabase extends Dexie {
@@ -43,6 +51,9 @@ export class MuralArchDatabase extends Dexie {
   layers!: Table<PaintLayer, string>
   decays!: Table<Decay, string>
   repairSteps!: Table<RepairStep, string>
+  ledgerEntries!: Table<LedgerEntry, string>
+  pendingMerges!: Table<PendingMerge, string>
+  ledgerDrafts!: Table<LedgerDraft, string>
 
   constructor() {
     super('gbmuralarch')
@@ -54,7 +65,7 @@ export class MuralArchDatabase extends Dexie {
       repairSteps: 'id, decayId, seq, state, updatedAt'
     })
     // v2：病害表补充 repairedAt 索引，工序表补充 name 索引
-    this.version(DB_VERSION)
+    this.version(2)
       .stores({
         halls: 'id, name, era, structureType, roofType, updatedAt',
         elements: 'id, hallId, position, status, updatedAt',
@@ -76,6 +87,74 @@ export class MuralArchDatabase extends Dexie {
             }
           })
       })
+    // v3：引入只追加的施工流水（ledgerEntries）、待合并区（pendingMerges）与流水草稿（ledgerDrafts）
+    this.version(DB_VERSION)
+      .stores({
+        halls: 'id, name, era, structureType, roofType, updatedAt',
+        elements: 'id, hallId, position, status, updatedAt',
+        layers: 'id, elementId, level, patternName, pigment',
+        decays: 'id, layerId, type, severity, repaired, repairedAt, updatedAt',
+        repairSteps: 'id, decayId, seq, name, state, updatedAt',
+        ledgerEntries: 'id, seq, status, kind, stepId, decayId, reversesEntryId, createdAt, resolvedAt',
+        pendingMerges: 'id, kind, stepId, decayId, createdAt',
+        ledgerDrafts: 'id, stepId, decayId, createdAt'
+      })
+      .upgrade(async (tx) => {
+        // 迁移：缺少流水版本的旧工序按现状补初始流水记录
+        const stepTable = tx.table<RepairStep>('repairSteps')
+        const decayTable = tx.table<Decay>('decays')
+        const entryTable = tx.table<LedgerEntry>('ledgerEntries')
+
+        const steps = await stepTable.toArray()
+        const initialEntries: LedgerEntry[] = []
+        let seq = 0
+        const stamp = Date.now()
+        // 接纳顺序按旧数据最后更新时间稳定排列
+        const sortedSteps = [...steps].sort(
+          (a, b) => (a.updatedAt ?? 0) - (b.updatedAt ?? 0) || a.id.localeCompare(b.id)
+        )
+        sortedSteps.forEach((step) => {
+          if (step.state === '已完成') {
+            seq += 1
+            initialEntries.push({
+              id: createId('led'),
+              seq,
+              kind: 'complete',
+              status: 'accepted',
+              stepId: step.id,
+              decayId: step.decayId,
+              stepName: step.name,
+              material: step.material,
+              operator: step.operator,
+              baseSeq: 0,
+              clientId: 'migration-v3',
+              reason: null,
+              reversesEntryId: null,
+              createdAt: step.updatedAt ?? stamp,
+              resolvedAt: step.updatedAt ?? stamp
+            })
+          }
+        })
+        if (initialEntries.length > 0) await entryTable.bulkAdd(initialEntries)
+        await stepTable.toCollection().modify((step) => {
+          step.ledgerVersion = 1
+        })
+
+        // 病害现状统一以对账结果重算：无正式流水支撑的旧 repaired 标记退回未修复，需重新走流水
+        const folds = foldEntries(initialEntries)
+        const decayStatus = foldDecayStatus(sortedSteps, folds)
+        await decayTable.toCollection().modify((decay) => {
+          const status = decayStatus.get(decay.id)
+          if (status) {
+            decay.repaired = status.repaired
+            decay.repairedAt = status.repairedAt
+          } else {
+            decay.repaired = false
+            decay.repairedAt = null
+          }
+          decay.updatedAt = decay.updatedAt ?? stamp
+        })
+      })
   }
 }
 
@@ -91,14 +170,26 @@ export function createId(prefix: string): string {
 export async function clearAllTables(): Promise<void> {
   await db.transaction(
     'rw',
-    [db.halls, db.elements, db.layers, db.decays, db.repairSteps],
+    [
+      db.halls,
+      db.elements,
+      db.layers,
+      db.decays,
+      db.repairSteps,
+      db.ledgerEntries,
+      db.pendingMerges,
+      db.ledgerDrafts
+    ],
     async () => {
       await Promise.all([
         db.halls.clear(),
         db.elements.clear(),
         db.layers.clear(),
         db.decays.clear(),
-        db.repairSteps.clear()
+        db.repairSteps.clear(),
+        db.ledgerEntries.clear(),
+        db.pendingMerges.clear(),
+        db.ledgerDrafts.clear()
       ])
     }
   )

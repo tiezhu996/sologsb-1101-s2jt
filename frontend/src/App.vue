@@ -3,11 +3,13 @@ import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Coin, Grid, OfficeBuilding, Tools, WarningFilled } from '@element-plus/icons-vue'
 import { useHallStore } from '@/stores/hallStore'
+import { useLedgerStore } from '@/stores/ledgerStore'
 import { useRepairStore } from '@/stores/repairStore'
 
 const route = useRoute()
 const router = useRouter()
 const hallStore = useHallStore()
+const ledger = useLedgerStore()
 const repairStore = useRepairStore()
 
 const navItems = computed(() => {
@@ -25,6 +27,13 @@ const navItems = computed(() => {
     { path: '/repair', label: '修复工序', icon: Tools, badge: String(repairStore.totalSteps) },
     { path: '/backup', label: '本地数据', icon: Coin, badge: '' }
   ]
+})
+
+const conflictBadge = computed(() => {
+  const parts: string[] = []
+  if (ledger.pendingCount > 0) parts.push(`待裁决 ${ledger.pendingCount}`)
+  if (ledger.draftCount > 0) parts.push(`待重试 ${ledger.draftCount}`)
+  return parts.join(' · ')
 })
 
 const activePath = computed(() => {
@@ -65,6 +74,11 @@ function go(path: string): void {
     </header>
 
     <main class="app-main">
+      <div v-if="conflictBadge" class="app-conflict" role="alert">
+        <el-icon><WarningFilled /></el-icon>
+        <span>施工流水存在 {{ conflictBadge }}（未裁决项不计入修复统计）</span>
+        <el-button size="small" text type="primary" @click="go('/repair')">前往处理</el-button>
+      </div>
       <router-view v-slot="{ Component }">
         <component :is="Component" />
       </router-view>
@@ -175,6 +189,19 @@ function go(path: string): void {
   max-width: 1320px;
   margin: 0 auto;
   padding: 20px 24px 32px;
+}
+
+.app-conflict {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  padding: 8px 14px;
+  font-size: 13px;
+  color: #9a5a00;
+  background: #fdf3e0;
+  border: 1px solid #f0d9ac;
+  border-radius: 10px;
 }
 
 .app-footer {

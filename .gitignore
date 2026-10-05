@@ -25,3 +25,6 @@ pnpm-debug.log*
 # 本地缓存
 .vite/
 *.tsbuildinfo
+
+# 测试打包中间产物
+frontend/scripts/.*.bundle.mjs

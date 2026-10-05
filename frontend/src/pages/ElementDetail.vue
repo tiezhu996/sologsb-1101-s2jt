@@ -9,6 +9,7 @@ import SeverityTag from '@/components/common/SeverityTag.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import { useHallStore } from '@/stores/hallStore'
 import { useDecayStore } from '@/stores/decayStore'
+import { useLedgerStore } from '@/stores/ledgerStore'
 import { ELEMENT_POSITIONS, ELEMENT_STATUSES, type Element, type ElementPosition, type ElementStatus } from '@/types/element'
 import { PATTERN_NAMES, PIGMENTS, type PaintLayer, type PatternName, type Pigment } from '@/types/layer'
 import { DECAY_TYPES, SEVERITIES, type Decay, type DecayType, type Severity } from '@/types/decay'
@@ -17,6 +18,7 @@ const route = useRoute()
 const router = useRouter()
 const hallStore = useHallStore()
 const decayStore = useDecayStore()
+const ledger = useLedgerStore()
 
 const hallId = computed(() => String(route.params.id ?? ''))
 const hall = computed(() => hallStore.hallById(hallId.value) ?? null)
@@ -169,7 +171,7 @@ const selectedStats = computed(() => {
   })
   return {
     decayCount: decays.length,
-    unrepaired: decays.filter((decay) => !decay.repaired).length,
+    unrepaired: decays.filter((decay) => !ledger.isRepaired(decay.id)).length,
     area: decays.reduce((sum, decay) => sum + decay.areaCm2, 0),
     severity
   }
@@ -542,8 +544,8 @@ const severityOptions = SEVERITIES
                         <el-table-column label="成因初判" prop="causeGuess" min-width="200" />
                         <el-table-column label="修复状态" width="100">
                           <template #default="{ row: decay }">
-                            <el-tag size="small" :type="decay.repaired ? 'success' : 'info'" effect="plain">
-                              {{ decay.repaired ? '已修复' : '未修复' }}
+                            <el-tag size="small" :type="ledger.isRepaired(decay.id) ? 'success' : 'info'" effect="plain">
+                              {{ ledger.isRepaired(decay.id) ? '已修复' : '未修复' }}
                             </el-tag>
                           </template>
                         </el-table-column>

@@ -6,6 +6,7 @@ import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import { useHallStore } from '@/stores/hallStore'
 import { useDecayStore } from '@/stores/decayStore'
+import { useLedgerStore } from '@/stores/ledgerStore'
 import { useRepairStore } from '@/stores/repairStore'
 import {
   DB_VERSION,
@@ -24,8 +25,19 @@ import {
 } from '@/utils/export'
 import { formatArea } from '@/utils/severity'
 
+type CollectionKey =
+  | 'halls'
+  | 'elements'
+  | 'layers'
+  | 'decays'
+  | 'repairSteps'
+  | 'ledgerEntries'
+  | 'pendingMerges'
+  | 'ledgerDrafts'
+
 const hallStore = useHallStore()
 const decayStore = useDecayStore()
+const ledger = useLedgerStore()
 const repairStore = useRepairStore()
 
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -47,7 +59,10 @@ const counts = computed(() => ({
   elements: hallStore.elements.length,
   layers: hallStore.layers.length,
   decays: decayStore.decays.length,
-  repairSteps: repairStore.steps.length
+  repairSteps: repairStore.steps.length,
+  ledgerEntries: ledger.entries.length,
+  pendingMerges: ledger.pendingCount,
+  ledgerDrafts: ledger.draftCount
 }))
 
 const storageRows = computed(() => [
@@ -59,7 +74,14 @@ const storageRows = computed(() => [
     key: 'id, layerId, type, severity, repaired, repairedAt, updatedAt',
     count: counts.value.decays
   },
-  { table: 'repairSteps（工序）', key: 'id, decayId, seq, name, state, updatedAt', count: counts.value.repairSteps }
+  { table: 'repairSteps（工序计划）', key: 'id, decayId, seq, name, state, updatedAt', count: counts.value.repairSteps },
+  {
+    table: 'ledgerEntries（施工流水，只追加）',
+    key: 'id, seq, status, kind, stepId, decayId, reversesEntryId, createdAt',
+    count: counts.value.ledgerEntries
+  },
+  { table: 'pendingMerges（待合并区）', key: 'id, kind, stepId, decayId, createdAt', count: counts.value.pendingMerges },
+  { table: 'ledgerDrafts（失败流水草稿）', key: 'id, stepId, decayId, createdAt', count: counts.value.ledgerDrafts }
 ])
 
 const localStorageRows = computed(() => [
@@ -76,7 +98,7 @@ async function doExport(): Promise<void> {
     const result = await exportBackupJson()
     lastBackupAt.value = readLastBackupAt()
     ElMessage.success(
-      `已导出 ${result.fileName}（殿宇 ${result.counts.halls} / 构件 ${result.counts.elements} / 层位 ${result.counts.layers} / 病害 ${result.counts.decays} / 工序 ${result.counts.repairSteps}）`
+      `已导出 ${result.fileName}（殿宇 ${result.counts.halls} / 构件 ${result.counts.elements} / 层位 ${result.counts.layers} / 病害 ${result.counts.decays} / 工序 ${result.counts.repairSteps} / 流水 ${result.counts.ledgerEntries}）`
     )
   } finally {
     exporting.value = false
@@ -115,18 +137,18 @@ async function confirmImport(): Promise<void> {
   if (!importPreview.value) return
   importing.value = true
   try {
-    const payload = importOverwrite.value ? importPreview.value : remapIds(importPreview.value)
+    const payload = importOverwrite.value ? importPreview.value : await remapIds(importPreview.value)
     const confirmed = await ElMessageBox.confirm(
       importOverwrite.value
-        ? '覆盖导入将清空当前全部本地数据后写入备份内容，是否继续？'
-        : '追加导入会为备份数据重新分配 id 并保留现有档案，是否继续？',
+        ? '覆盖导入将清空当前全部本地数据后写入备份内容（含施工流水与待合并区），是否继续？'
+        : '追加导入会为备份数据重新分配 id、流水序号顺延并保留现有档案，是否继续？',
       '导入确认',
       { type: 'warning', confirmButtonText: '开始导入', cancelButtonText: '取消' }
     ).catch(() => false)
     if (!confirmed) return
     const result = await importBackup(payload, importOverwrite.value)
     ElMessage.success(
-      `导入完成：殿宇 ${result.halls} / 构件 ${result.elements} / 层位 ${result.layers} / 病害 ${result.decays} / 工序 ${result.repairSteps}`
+      `导入完成：殿宇 ${result.halls} / 构件 ${result.elements} / 层位 ${result.layers} / 病害 ${result.decays} / 工序 ${result.repairSteps} / 正式流水 ${result.ledgerEntries}（待裁决 ${result.pendingMerges}）`
     )
     importPreview.value = null
   } finally {
@@ -136,7 +158,7 @@ async function confirmImport(): Promise<void> {
 
 async function doClear(): Promise<void> {
   const confirmed = await ElMessageBox.confirm(
-    '将清空浏览器 IndexedDB 中的全部业务数据（殿宇、构件、层位、病害、工序），此操作不可撤销。是否继续？',
+    '将清空浏览器 IndexedDB 中的全部业务数据（殿宇、构件、层位、病害、工序计划、施工流水、待合并区与草稿），此操作不可撤销。是否继续？',
     '清空本地数据',
     { type: 'error', confirmButtonText: '确认清空', cancelButtonText: '取消' }
   ).catch(() => false)
@@ -150,19 +172,23 @@ async function doClear(): Promise<void> {
 
 async function doSeed(): Promise<void> {
   await seedDemoData()
+  await ledger.reconcileCaches()
   ElMessage.success('已生成本地样例档案')
 }
 
-function previewCount(payload: BackupPayload, key: keyof Pick<BackupPayload, 'halls' | 'elements' | 'layers' | 'decays' | 'repairSteps'>): number {
+function previewCount(payload: BackupPayload, key: CollectionKey): number {
   return payload[key].length
 }
 
-const previewKeys: Array<{ key: keyof Pick<BackupPayload, 'halls' | 'elements' | 'layers' | 'decays' | 'repairSteps'>; label: string }> = [
+const previewKeys: Array<{ key: CollectionKey; label: string }> = [
   { key: 'halls', label: '殿宇' },
   { key: 'elements', label: '构件' },
   { key: 'layers', label: '层位' },
   { key: 'decays', label: '病害' },
-  { key: 'repairSteps', label: '工序' }
+  { key: 'repairSteps', label: '工序' },
+  { key: 'ledgerEntries', label: '流水' },
+  { key: 'pendingMerges', label: '待合并' },
+  { key: 'ledgerDrafts', label: '草稿' }
 ]
 </script>
 
@@ -187,7 +213,10 @@ const previewKeys: Array<{ key: keyof Pick<BackupPayload, 'halls' | 'elements' |
       <StatBadge label="构件" :value="counts.elements" suffix="件" icon="Grid" tone="info" />
       <StatBadge label="彩画层位" :value="counts.layers" suffix="层" icon="Files" />
       <StatBadge label="病害记录" :value="counts.decays" suffix="条" icon="Histogram" tone="warning" />
-      <StatBadge label="工序" :value="counts.repairSteps" suffix="道" icon="Tools" tone="success" />
+      <StatBadge label="工序计划" :value="counts.repairSteps" suffix="道" icon="Tools" tone="success" />
+      <StatBadge label="施工流水" :value="counts.ledgerEntries" suffix="条" icon="Document" tone="primary" />
+      <StatBadge label="待合并裁决" :value="counts.pendingMerges" suffix="笔" icon="ScaleToOriginal" tone="danger" />
+      <StatBadge label="失败草稿" :value="counts.ledgerDrafts" suffix="笔" icon="DocumentRemove" tone="warning" />
       <StatBadge label="病害总面积" :value="formatArea(decayStore.totalArea)" icon="PieChart" />
     </div>
 
@@ -214,7 +243,9 @@ const previewKeys: Array<{ key: keyof Pick<BackupPayload, 'halls' | 'elements' |
         </el-table-column>
       </el-table>
       <p class="muted storage-note">
-        版本 1 → 2 的迁移：decays 表补充 repairedAt 索引，修复状态字段缺失的历史数据按 updatedAt 回填。
+        版本 1 → 2：decays 补充 repairedAt 索引并回填历史数据。<br />
+        版本 2 → 3：引入只追加施工流水（ledgerEntries）、待合并区（pendingMerges）与失败草稿（ledgerDrafts）；
+        缺少流水版本的旧工序按现状补初始完成记录，病害修复态统一按流水对账重算。
       </p>
     </div>
 

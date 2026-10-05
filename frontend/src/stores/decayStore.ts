@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, reactive, ref } from 'vue'
 import { db } from '@/utils/db'
 import { useIdbTable } from '@/hooks/useIdbTable'
+import { useLedgerStore } from '@/stores/ledgerStore'
 import {
   createEmptyDecayFilter,
   type Decay,
@@ -24,11 +25,14 @@ export interface DecayRow {
 
 /**
  * 病害 store：维护筛选条件与统计派生值，供档案台、殿宇总览共用。
+ * 病害「是否已修复」一律读取施工流水对账结果（ledgerStore.decayStatuses），
+ * decays.repaired 仅作缓存并由流水事务维护，页面不得直接覆写。
  */
 export const useDecayStore = defineStore('decay', () => {
   const decaysTable = useIdbTable<Decay>((database) => database.decays)
   const layersTable = useIdbTable<PaintLayer>((database) => database.layers, { sortByUpdatedAt: false })
   const elementsTable = useIdbTable<Element>((database) => database.elements, { sortByUpdatedAt: false })
+  const ledger = useLedgerStore()
 
   const filter = ref<DecayFilterState>(createEmptyDecayFilter())
   const selectedIds = reactive<Set<string>>(new Set<string>())
@@ -36,6 +40,11 @@ export const useDecayStore = defineStore('decay', () => {
   const decays = computed<Decay[]>(() => decaysTable.rows.value)
   const layers = computed<PaintLayer[]>(() => layersTable.rows.value)
   const elements = computed<Element[]>(() => elementsTable.rows.value)
+
+  /** 对账后的病害修复态（未裁决项不参与） */
+  function isRepaired(decayId: string): boolean {
+    return ledger.isRepaired(decayId)
+  }
 
   /** 展开后的档案行，附带层位、构件与殿宇归属 */
   const rows = computed<DecayRow[]>(() => {
@@ -56,7 +65,7 @@ export const useDecayStore = defineStore('decay', () => {
     })
   })
 
-  /** 按筛选条件过滤后的档案行 */
+  /** 按筛选条件过滤后的档案行（修复态以流水对账为准） */
   const filteredRows = computed<DecayRow[]>(() =>
     rows.value.filter((row) => {
       const { decay, layer, element } = row
@@ -73,7 +82,7 @@ export const useDecayStore = defineStore('decay', () => {
       if (filter.value.types.length > 0 && !filter.value.types.includes(decay.type)) return false
       if (filter.value.severities.length > 0 && !filter.value.severities.includes(decay.severity)) return false
       if (filter.value.pigments.length > 0 && (!layer || !filter.value.pigments.includes(layer.pigment))) return false
-      if (filter.value.onlyUnrepaired && decay.repaired) return false
+      if (filter.value.onlyUnrepaired && ledger.isRepaired(decay.id)) return false
       return true
     })
   )
@@ -108,19 +117,21 @@ export const useDecayStore = defineStore('decay', () => {
 
   const totalArea = computed(() => decays.value.reduce((sum, decay) => sum + decay.areaCm2, 0))
   const filteredArea = computed(() => filteredRows.value.reduce((sum, row) => sum + row.decay.areaCm2, 0))
-  const unrepairedCount = computed(() => decays.value.filter((decay) => !decay.repaired).length)
+  const unrepairedCount = computed(
+    () => decays.value.filter((decay) => !ledger.isRepaired(decay.id)).length
+  )
   const repairedPercent = computed(() =>
     decays.value.length === 0 ? 0 : Math.round(((decays.value.length - unrepairedCount.value) / decays.value.length) * 100)
   )
 
-  /** 按殿宇聚合病害数量，殿宇总览卡片直接消费 */
+  /** 按殿宇聚合病害数量，殿宇总览卡片直接消费（修复态取流水对账结果） */
   const hallAggregate = computed<Record<string, { total: number; unrepaired: number; areaCm2: number }>>(() => {
     const aggregate: Record<string, { total: number; unrepaired: number; areaCm2: number }> = {}
     rows.value.forEach((row) => {
       if (!row.hallId) return
       const bucket = aggregate[row.hallId] ?? { total: 0, unrepaired: 0, areaCm2: 0 }
       bucket.total += 1
-      if (!row.decay.repaired) bucket.unrepaired += 1
+      if (!ledger.isRepaired(row.decay.id)) bucket.unrepaired += 1
       bucket.areaCm2 += row.decay.areaCm2
       aggregate[row.hallId] = bucket
     })
@@ -179,10 +190,21 @@ export const useDecayStore = defineStore('decay', () => {
   }
 
   async function removeDecay(id: string): Promise<void> {
-    await db.transaction('rw', [db.decays, db.repairSteps], async () => {
-      await db.repairSteps.where('decayId').equals(id).delete()
-      await db.decays.delete(id)
-    })
+    await db.transaction(
+      'rw',
+      [db.decays, db.repairSteps, db.ledgerEntries, db.pendingMerges, db.ledgerDrafts],
+      async () => {
+        const stepIds = (await db.repairSteps.where('decayId').equals(id).toArray()).map((step) => step.id)
+        if (stepIds.length > 0) {
+          await db.pendingMerges.where('stepId').anyOf(stepIds).delete()
+          await db.ledgerDrafts.where('stepId').anyOf(stepIds).delete()
+        }
+        // 正式流水（含反向记录）保留可查，但随业务对象一并清理其全部痕迹
+        await db.ledgerEntries.where('decayId').equals(id).delete()
+        await db.repairSteps.where('decayId').equals(id).delete()
+        await db.decays.delete(id)
+      }
+    )
     selectedIds.delete(id)
   }
 
@@ -212,12 +234,6 @@ export const useDecayStore = defineStore('decay', () => {
     return ids.length
   }
 
-  /** 标记 / 取消已修复，由修复工序完成态调用 */
-  async function setRepaired(id: string, repaired: boolean): Promise<void> {
-    const now = Date.now()
-    await decaysTable.update(id, { repaired, repairedAt: repaired ? now : null })
-  }
-
   return {
     filter,
     selectedIds,
@@ -236,6 +252,7 @@ export const useDecayStore = defineStore('decay', () => {
     hallAggregate,
     hallRisk,
     hasFilter,
+    isRepaired,
     patchFilter,
     resetFilter,
     toggleSelection,
@@ -245,7 +262,6 @@ export const useDecayStore = defineStore('decay', () => {
     updateDecay,
     removeDecay,
     bulkSetSeverity,
-    bulkSetType,
-    setRepaired
+    bulkSetType
   }
 })

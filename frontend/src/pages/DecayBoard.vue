@@ -10,6 +10,7 @@ import StatBadge from '@/components/common/StatBadge.vue'
 import { useDecayFilter } from '@/hooks/useDecayFilter'
 import { useHallStore } from '@/stores/hallStore'
 import { useDecayStore } from '@/stores/decayStore'
+import { useLedgerStore } from '@/stores/ledgerStore'
 import { useRepairStore } from '@/stores/repairStore'
 import { DECAY_TYPES, type Decay, type DecayType, type Severity } from '@/types/decay'
 import { SEVERITIES } from '@/types/decay'
@@ -18,6 +19,7 @@ import { formatArea, SEVERITY_COLOR } from '@/utils/severity'
 const router = useRouter()
 const hallStore = useHallStore()
 const decayStore = useDecayStore()
+const ledger = useLedgerStore()
 const repairStore = useRepairStore()
 
 const {
@@ -122,8 +124,15 @@ function hallLabel(layerId: string): string {
 }
 
 function repairProgress(decayId: string): { done: number; total: number } {
-  const steps = repairStore.steps.filter((step) => step.decayId === decayId)
-  return { done: steps.filter((step) => step.state === '已完成').length, total: steps.length }
+  const stepList = repairStore.steps.filter((step) => step.decayId === decayId)
+  return {
+    done: stepList.filter((step) => repairStore.displayState(step) === '已完成').length,
+    total: stepList.length
+  }
+}
+
+function resolvedRepaired(decay: Decay): boolean {
+  return ledger.isRepaired(decay.id)
 }
 
 async function applyBatchSeverity(): Promise<void> {
@@ -181,20 +190,22 @@ async function removeRow(row: { decay: Decay }): Promise<void> {
 }
 
 async function toggleRepaired(row: { decay: Decay }): Promise<void> {
-  await decayStore.setRepaired(row.decay.id, !row.decay.repaired)
-  ElMessage.success(row.decay.repaired ? '已标记为未修复' : '已标记为已修复')
-}
-
-async function bulkMarkRepaired(repaired: boolean): Promise<void> {
-  const ids = Array.from(decayStore.selectedIds)
-  if (ids.length === 0) {
-    ElMessage.warning('请先勾选需要处理的病害记录')
+  const target = !ledger.isRepaired(row.decay.id)
+  const stepList = repairStore.steps.filter((step) => step.decayId === row.decay.id)
+  if (stepList.length === 0) {
+    ElMessage.warning('该病害尚无修复工序，不能直接标记：请先到修复工序页编排工序')
     return
   }
-  for (const id of ids) {
-    await decayStore.setRepaired(id, repaired)
+  const result = await ledger.markDecay(row.decay.id, target)
+  if (result.failed > 0) {
+    ElMessage.error(`${result.failed} 笔写入失败，流水草稿已保留，请到工序时间线重试`)
+  } else if (result.pending > 0) {
+    ElMessage.warning('存在并发提交，相关记录已进入待合并区，裁决后才计入修复统计')
+  } else if (result.accepted > 0) {
+    ElMessage.success(target ? '已按施工流水标记为已修复' : '已按反向流水撤回修复标记')
+  } else {
+    ElMessage.info('现状已一致，无需重复提交')
   }
-  ElMessage.success(`已批量标记 ${ids.length} 条为${repaired ? '已修复' : '未修复'}`)
 }
 
 function goRepair(row: { decay: Decay }): void {
@@ -303,8 +314,9 @@ const severityPalette = SEVERITY_COLOR
       </el-select>
       <el-button type="primary" plain size="small" @click="applyBatchType">应用</el-button>
 
-      <el-button size="small" @click="bulkMarkRepaired(true)">标记已修复</el-button>
-      <el-button size="small" @click="bulkMarkRepaired(false)">标记未修复</el-button>
+      <span class="muted batch-bar__hint">
+        修复 / 撤回请逐行操作或到工序时间线提交施工流水；待裁决项不计入修复统计。
+      </span>
     </div>
 
     <div class="section-card">
@@ -341,10 +353,18 @@ const severityPalette = SEVERITY_COLOR
           <template #default="{ row }">{{ layerLabel(row.decay.layerId) }}</template>
         </el-table-column>
         <el-table-column label="成因初判" prop="decay.causeGuess" min-width="200" show-overflow-tooltip />
-        <el-table-column label="修复" width="150">
+        <el-table-column label="修复" width="170">
           <template #default="{ row }">
-            <el-tag size="small" :type="row.decay.repaired ? 'success' : 'info'" effect="plain">
-              {{ row.decay.repaired ? '已修复' : '未修复' }}
+            <el-tag
+              size="small"
+              :type="ledger.pendingCountByDecay[row.decay.id] ? 'warning' : resolvedRepaired(row.decay) ? 'success' : 'info'"
+              effect="plain"
+            >
+              {{ ledger.pendingCountByDecay[row.decay.id]
+                ? `待裁决 ${ledger.pendingCountByDecay[row.decay.id]}`
+                : resolvedRepaired(row.decay)
+                  ? '已修复'
+                  : '未修复' }}
             </el-tag>
             <span class="mono muted repair-progress">
               {{ repairProgress(row.decay.id).done }}/{{ repairProgress(row.decay.id).total }}
@@ -357,7 +377,7 @@ const severityPalette = SEVERITY_COLOR
             <el-button size="small" text :icon="Tools" @click="goRepair(row)">排工序</el-button>
             <el-button size="small" text type="primary" @click="goElements(row)">看层位</el-button>
             <el-button size="small" text @click="toggleRepaired(row)">
-              {{ row.decay.repaired ? '撤销修复' : '标记修复' }}
+              {{ resolvedRepaired(row.decay) ? '撤回修复' : '标记修复' }}
             </el-button>
             <el-button size="small" text type="danger" :icon="Delete" @click="removeRow(row)">删除</el-button>
           </template>
@@ -428,6 +448,10 @@ const severityPalette = SEVERITY_COLOR
 
 .batch-bar__select {
   width: 140px;
+}
+
+.batch-bar__hint {
+  font-size: 12px;
 }
 
 .full-width {
